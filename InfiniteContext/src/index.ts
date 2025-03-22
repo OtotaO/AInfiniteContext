@@ -28,6 +28,10 @@ export * from './utils/BackupManager.js';
 export * from './utils/DataPortability.js';
 export * from './utils/IndexManager.js';
 
+// Categorization
+export { PromptCategorizer } from './categorization/PromptCategorizer.js';
+export * from './categorization/models/CategoryModel.js';
+
 // Re-export OpenAI for convenience
 import { OpenAI } from 'openai';
 export { OpenAI };
@@ -39,6 +43,7 @@ import { MemoryManager } from './core/MemoryManager.js';
 import { SummarizationEngine } from './summarization/SummarizationEngine.js';
 import { GoogleDriveProvider } from './providers/GoogleDriveProvider.js';
 import { Chunk, ChunkLocation, Metadata, StorageTier, Vector } from './core/types.js';
+import { PromptCategorizer } from './categorization/PromptCategorizer.js';
 
 /**
  * Main InfiniteContext class that provides a simplified API for using the system
@@ -46,6 +51,7 @@ import { Chunk, ChunkLocation, Metadata, StorageTier, Vector } from './core/type
 export class InfiniteContext {
   private memoryManager: MemoryManager;
   private summarizationEngine: SummarizationEngine;
+  private promptCategorizer?: PromptCategorizer;
   private embeddingModel?: any;
   private llmModel?: any;
 
@@ -59,6 +65,11 @@ export class InfiniteContext {
     openai?: OpenAI;
     embeddingModel?: string;
     llmModel?: string;
+    categorizerOptions?: {
+      cacheSize?: number;
+      cacheExpiration?: number;
+      enableLearning?: boolean;
+    };
     googleDriveCredentials?: {
       clientId: string;
       clientSecret: string;
@@ -115,6 +126,12 @@ export class InfiniteContext {
       domainGrowthThresholdPercent: number;
       monitoringIntervalMs: number;
     }>;
+    initializeCategorizer?: boolean;
+    categorizerOptions?: {
+      cacheSize?: number;
+      cacheExpiration?: number;
+      enableLearning?: boolean;
+    };
   } = {}): Promise<void> {
     // Initialize the memory manager
     await this.memoryManager.initialize();
@@ -140,6 +157,25 @@ export class InfiniteContext {
         console.log(`[InfiniteContext] Memory Alert: ${alert.message}`);
         console.log(`Details: ${JSON.stringify(alert.details)}`);
       });
+    }
+    
+    // Initialize the prompt categorizer if requested
+    if (options.initializeCategorizer !== false && this.memoryManager['embeddingFunction']) {
+      const categorizerOptions = options.categorizerOptions || {};
+      
+      this.promptCategorizer = new PromptCategorizer(
+        this.memoryManager,
+        {
+          cacheOptions: {
+            maxSize: categorizerOptions.cacheSize || 1000,
+            expirationMs: categorizerOptions.cacheExpiration || 24 * 60 * 60 * 1000, // 24 hours
+          },
+          embeddingFunction: this.memoryManager['embeddingFunction'],
+          enableLearning: categorizerOptions.enableLearning !== false,
+        }
+      );
+      
+      console.log('Prompt categorizer initialized');
     }
   }
 
@@ -498,6 +534,83 @@ export class InfiniteContext {
     const { getOptimalIndexParams } = await import('./utils/IndexManager.js');
     
     return getOptimalIndexParams(size, dimension, memoryBudget);
+  }
+
+  /**
+   * Store a prompt and its output with automatic categorization
+   * 
+   * @param prompt - The prompt text
+   * @param output - The output text
+   * @param options - Storage options
+   * @returns The ID of the created chunk
+   */
+  public async storePromptAndOutput(
+    prompt: string,
+    output: string,
+    options: {
+      metadata?: Partial<Omit<Metadata, 'id' | 'timestamp'>>;
+      summarize?: boolean;
+      preferredTier?: StorageTier;
+      overrideBucket?: { name: string, domain: string };
+    } = {}
+  ): Promise<string> {
+    // Ensure the categorizer is initialized
+    if (!this.promptCategorizer) {
+      throw new Error('Prompt categorizer is not initialized. Call initialize() with initializeCategorizer: true first.');
+    }
+    
+    // Use the categorizer to find the best bucket
+    const categorization = await this.promptCategorizer.categorize(prompt, output);
+    
+    // Allow manual override
+    const finalBucketName = options.overrideBucket?.name || categorization.bucketName;
+    const finalBucketDomain = options.overrideBucket?.domain || categorization.bucketDomain;
+    
+    // Store with the determined bucket
+    const chunkId = await this.storeContent(
+      `Prompt: ${prompt}\n\nOutput: ${output}`,
+      {
+        bucketName: finalBucketName,
+        bucketDomain: finalBucketDomain,
+        metadata: {
+          ...options.metadata,
+          prompt,
+          output,
+          categorization: {
+            confidence: categorization.confidence,
+            strategy: categorization.strategy,
+            automatic: !options.overrideBucket
+          }
+        },
+        summarize: options.summarize,
+        preferredTier: options.preferredTier
+      }
+    );
+    
+    // If there was a manual override, record it as feedback
+    if (options.overrideBucket) {
+      this.promptCategorizer.recordFeedback(
+        prompt,
+        output,
+        `${categorization.bucketName}/${categorization.bucketDomain}`,
+        `${options.overrideBucket.name}/${options.overrideBucket.domain}`
+      );
+    }
+    
+    return chunkId;
+  }
+
+  /**
+   * Update the categorizer with the latest buckets
+   * 
+   * @returns Promise that resolves when the update is complete
+   */
+  public async updateCategorizer(): Promise<void> {
+    if (!this.promptCategorizer) {
+      throw new Error('Prompt categorizer is not initialized. Call initialize() with initializeCategorizer: true first.');
+    }
+    
+    await this.promptCategorizer.updateCategories();
   }
 
   /**
