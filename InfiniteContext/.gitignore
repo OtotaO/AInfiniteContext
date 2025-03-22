@@ -1,0 +1,34 @@
+# Dependency directories
+node_modules/
+
+# Build output
+dist/
+build/
+
+# Environment variables
+.env
+
+# Storage directories
+storage/
+.infinite-context/
+.infinite-context-example/
+
+# Log files
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Editor and OS specific files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Coverage output
+coverage/
+
+# Temporary files
+*.tmp
+*.temp
