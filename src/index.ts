@@ -84,13 +84,47 @@ export class InfiniteContext {
       this.embeddingModel = options.embeddingModel || "text-embedding-3-small";
       this.llmModel = options.llmModel || "gpt-3.5-turbo";
 
-      embeddingFunction = async (text: string): Promise<Vector> => {
-        const response = await options.openai!.embeddings.create({
-          model: this.embeddingModel,
-          input: text,
-        });
+      // Simple LRU cache for embeddings
+      const cache = new Map<string, Promise<Vector>>();
+      const MAX_CACHE_SIZE = 1000;
 
-        return response.data[0].embedding;
+      embeddingFunction = async (text: string): Promise<Vector> => {
+        // Check if the embedding is already being fetched or is in the cache
+        if (cache.has(text)) {
+          const cachedPromise = cache.get(text)!;
+          // Move to the end of the Map (most recently used)
+          cache.delete(text);
+          cache.set(text, cachedPromise);
+          return cachedPromise;
+        }
+
+        // Create the promise for the embedding
+        const embeddingPromise = (async () => {
+          try {
+            const response = await options.openai!.embeddings.create({
+              model: this.embeddingModel,
+              input: text,
+            });
+            return response.data[0].embedding;
+          } catch (error) {
+            // If the request fails, remove it from the cache so it can be retried
+            cache.delete(text);
+            throw error;
+          }
+        })();
+
+        // Store the promise in the cache
+        cache.set(text, embeddingPromise);
+
+        // Maintain the maximum cache size
+        if (cache.size > MAX_CACHE_SIZE) {
+          const oldestKey = cache.keys().next().value;
+          if (oldestKey !== undefined) {
+            cache.delete(oldestKey);
+          }
+        }
+
+        return embeddingPromise;
       };
     }
 
